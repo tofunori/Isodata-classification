@@ -7,10 +7,27 @@ import rasterio  # Add this line
 from config import INPUT_FILE, OUTPUT_DIR, SELECTED_BANDS, N_CLUSTERS_MIN, N_CLUSTERS_MAX, MAX_ITERATIONS, MIN_SAMPLES, MAX_STD_DEV, MIN_DIST, MAX_MERGE_PAIRS, CONVERGENCE_THRESHOLD
 from utils import save_raster
 
-def perform_classification():
-    """Perform IsoData classification on selected bands."""
-    print("Classification non-supervisée avec IsoData...")
+def perform_classification(spectral_indices=None, index_names=None):
+    """
+    Perform IsoData classification on selected bands and optional spectral indices.
+    
+    Parameters:
+    -----------
+    spectral_indices : numpy.ndarray, optional
+        Spectral indices to include in the classification (n_indices x height x width)
+    index_names : list, optional
+        Names of the spectral indices in the same order as the spectral_indices array
+    
+    Returns:
+    --------
+    numpy.ndarray
+        Classification result as a 2D array
+    """
+    print("\n=== Classification non-supervisée avec IsoData ===")
     print(f"Utilisation de {len(SELECTED_BANDS)} bandes: {SELECTED_BANDS}")
+    
+    if spectral_indices is not None and index_names:
+        print(f"Intégration de {len(index_names)} indices spectraux: {', '.join(index_names)}")
 
     with rasterio.open(INPUT_FILE) as src:
         bands_data = []
@@ -22,29 +39,45 @@ def perform_classification():
             band_names.append(name)
             print(f"  ✓ Bande {i}: {name} chargée")
 
+        # Check dimensions of all bands and resize if necessary
         reference_shape = bands_data[0].shape
         for i, band in enumerate(bands_data):
             if band.shape != reference_shape:
                 print(f"  Redimensionnement de '{band_names[i]}' à {reference_shape}")
                 bands_data[i] = resize(band, reference_shape, preserve_range=True)
 
+        # Stack bands
         stack = np.stack(bands_data)
         n_bands, height, width = stack.shape
         print(f"Stack de dimensions: {n_bands} bandes x {height} lignes x {width} colonnes")
+        
+        # Add spectral indices if provided
+        if spectral_indices is not None and spectral_indices.shape[1:] == reference_shape:
+            n_indices = spectral_indices.shape[0]
+            print(f"Ajout de {n_indices} indices spectraux au stack")
+            stack = np.vstack([stack, spectral_indices])
+            n_features = n_bands + n_indices
+            print(f"Nouveau stack: {n_features} features x {height} lignes x {width} colonnes")
+        else:
+            n_features = n_bands
 
-        data_for_clustering = stack.reshape(n_bands, -1).T
+        # Reshape for clustering
+        data_for_clustering = stack.reshape(n_features, -1).T
         valid_pixels = ~np.isnan(data_for_clustering).any(axis=1)
         valid_data_raw = data_for_clustering[valid_pixels]
 
+        # Normalize data
         scaler = StandardScaler()
         valid_data = scaler.fit_transform(valid_data_raw)
-        print(f"Données normalisées: {valid_data.shape[0]} pixels valides avec {n_bands} dimensions")
+        print(f"Données normalisées: {valid_data.shape[0]} pixels valides avec {n_features} dimensions")
 
+        # Initialize with K-means
         print(f"Initialisation avec {N_CLUSTERS_MIN} classes...")
         kmeans_init = KMeans(n_clusters=N_CLUSTERS_MIN, max_iter=10, init='k-means++', random_state=42, n_init='auto')
         labels = kmeans_init.fit_predict(valid_data)
         centers = kmeans_init.cluster_centers_
 
+        # Run IsoData algorithm
         print("Exécution de l'algorithme IsoData...")
         iteration = 0
         n_clusters_current = N_CLUSTERS_MIN
@@ -67,6 +100,7 @@ def perform_classification():
             unique_labels, counts = np.unique(labels, return_counts=True)
             empty_clusters = np.setdiff1d(np.arange(n_clusters_current), unique_labels)
 
+            # Handle empty clusters
             for empty in empty_clusters:
                 largest_cluster = unique_labels[np.argmax(counts)]
                 largest_indices = np.where(labels == largest_cluster)[0]
@@ -75,11 +109,13 @@ def perform_classification():
                 farthest_point = largest_indices[np.argmax(center_dist)]
                 centers[empty] = valid_data[farthest_point]
 
+            # Update centers
             for i in range(n_clusters_current):
                 if i in unique_labels:
                     cluster_points = valid_data[labels == i]
                     centers[i] = np.mean(cluster_points, axis=0)
 
+            # Split clusters if needed
             if n_clusters_current < N_CLUSTERS_MAX:
                 clusters_to_split = []
                 for i in range(n_clusters_current):
@@ -96,11 +132,12 @@ def perform_classification():
                         break
                     max_var_axis = np.argmax(std_devs)
                     std_dev = std_devs[max_var_axis]
-                    centers = np.vstack([centers, centers[i] + np.array([0.5 * std_dev if j == max_var_axis else 0 for j in range(n_bands)])])
-                    centers[i] = centers[i] - np.array([0.5 * std_dev if j == max_var_axis else 0 for j in range(n_bands)])
+                    centers = np.vstack([centers, centers[i] + np.array([0.5 * std_dev if j == max_var_axis else 0 for j in range(n_features)])])
+                    centers[i] = centers[i] - np.array([0.5 * std_dev if j == max_var_axis else 0 for j in range(n_features)])
                     n_clusters_current += 1
                     print(f"  Cluster {i} divisé selon l'axe {max_var_axis} (std={std_dev:.4f}) → {n_clusters_current} clusters")
 
+            # Merge clusters if needed
             if n_clusters_current > N_CLUSTERS_MIN:
                 center_distances = np.sqrt(((centers[:, np.newaxis, :] - centers[np.newaxis, :, :]) ** 2).sum(axis=2))
                 np.fill_diagonal(center_distances, np.inf)
@@ -126,11 +163,13 @@ def perform_classification():
 
             print(f"Itération {iteration}: {n_clusters_current} clusters")
 
+        # Prepare final classification
         clusters = labels
         classification = np.zeros(height * width, dtype=np.uint8)
         classification[valid_pixels] = clusters + 1
         classification = classification.reshape(height, width)
 
+        # Save classification result
         class_path = os.path.join(OUTPUT_DIR, "classification_isodata.tif")
         profile_out = src.profile.copy()
         profile_out.update(count=1, dtype=rasterio.uint8, nodata=0)
@@ -142,6 +181,23 @@ def perform_classification():
         for i, (cls, count) in enumerate(zip(unique_classes[1:], class_counts[1:])):
             percentage = (count / np.sum(class_counts[1:])) * 100
             print(f"  Classe {cls}: {count} pixels ({percentage:.2f}%)")
+            
+            # If spectral indices were used, show the mean values for each class
+            if spectral_indices is not None and index_names:
+                print(f"    Caractéristiques spectrales:")
+                # For each band
+                for b, band_name in enumerate(band_names):
+                    band_values = bands_data[b][classification == cls]
+                    if len(band_values) > 0:
+                        mean_value = np.mean(band_values)
+                        print(f"      {band_name}: {mean_value:.4f}")
+                
+                # For each index
+                for idx, index_name in enumerate(index_names):
+                    index_values = spectral_indices[idx][classification == cls]
+                    if len(index_values) > 0:
+                        mean_value = np.mean(index_values)
+                        print(f"      {index_name.upper()}: {mean_value:.4f}")
 
         print("\nCréation d'une version avec fusion des classes 4 et 7 (bâtiments)...")
         classification_merged = classification.copy()

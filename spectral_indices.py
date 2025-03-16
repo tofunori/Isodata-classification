@@ -1,7 +1,7 @@
 import numpy as np
 import rasterio
 import os
-from config import INPUT_FILE, OUTPUT_DIR
+from config import INPUT_FILE, OUTPUT_DIR, BAND_MAPPING
 
 def calculate_indices(indices_list=None, save_outputs=True):
     """
@@ -43,32 +43,6 @@ def calculate_indices(indices_list=None, save_outputs=True):
     
     print(f"Opening raster file: {INPUT_FILE}")
     with rasterio.open(INPUT_FILE) as src:
-        # Band mapping for Sentinel-2 (adjust based on your data)
-        # Sentinel-2 band numbers:
-        # 1: Coastal aerosol (443 nm)
-        # 2: Blue (490 nm)
-        # 3: Green (560 nm)
-        # 4: Red (665 nm)
-        # 5: Red Edge 1 (705 nm)
-        # 6: Red Edge 2 (740 nm)
-        # 7: Red Edge 3 (783 nm)
-        # 8: NIR (842 nm)
-        # 8A: Narrow NIR (865 nm)
-        # 9: Water vapor (945 nm)
-        # 10: Cirrus (1375 nm)
-        # 11: SWIR 1 (1610 nm)
-        # 12: SWIR 2 (2190 nm)
-        
-        # Define band mapping - adjust these based on your input data's band ordering
-        band_mapping = {
-            'blue': 2,    # Band 2 in Sentinel-2
-            'green': 3,   # Band 3 in Sentinel-2
-            'red': 4,     # Band 4 in Sentinel-2
-            'nir': 8,     # Band 8 in Sentinel-2
-            'swir1': 11,  # Band 11 in Sentinel-2
-            'swir2': 12   # Band 12 in Sentinel-2
-        }
-        
         # Load required bands based on the requested indices
         required_bands = set()
         
@@ -92,7 +66,7 @@ def calculate_indices(indices_list=None, save_outputs=True):
         
         # Load the required bands
         for band_name in required_bands:
-            band_number = band_mapping.get(band_name)
+            band_number = BAND_MAPPING.get(band_name)
             if band_number is None:
                 print(f"Warning: Band mapping for '{band_name}' not found.")
                 continue
